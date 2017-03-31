@@ -18,7 +18,13 @@ class APC implements Adapter
         $metrics = $this->collectHistograms();
         $metrics = array_merge($metrics, $this->collectGauges());
         $metrics = array_merge($metrics, $this->collectCounters());
+        //$metrics = array_merge($metrics, $this->collectSummaries());
         return $metrics;
+    }
+
+    public function updateSummary(array $data)
+    {
+        // TODO: Implement updateSummary() method.
     }
 
     public function updateHistogram(array $data)

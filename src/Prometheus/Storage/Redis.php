@@ -8,6 +8,7 @@ use Prometheus\Exception\StorageException;
 use Prometheus\Gauge;
 use Prometheus\Histogram;
 use Prometheus\MetricFamilySamples;
+use Prometheus\Summary;
 
 class Redis implements Adapter
 {
@@ -72,6 +73,7 @@ class Redis implements Adapter
         $metrics = $this->collectHistograms();
         $metrics = array_merge($metrics, $this->collectGauges());
         $metrics = array_merge($metrics, $this->collectCounters());
+        $metrics = array_merge($metrics, $this->collectSummaries());
         return array_map(
             function (array $metric) {
                 return new MetricFamilySamples($metric);
@@ -95,6 +97,42 @@ class Redis implements Adapter
         } catch (\RedisException $e) {
             throw new StorageException("Can't connect to Redis server", 0, $e);
         }
+    }
+
+    public function updateSummary(array $data)
+    {
+        $this->openConnection();
+
+        $metaData = $data;
+        unset($metaData['value']);
+        unset($metaData['labelValues']);
+        $this->redis->eval(<<<LUA
+local increment = redis.call('hIncrByFloat', KEYS[1], KEYS[2], ARGV[1])
+redis.call('hIncrBy', KEYS[1], KEYS[3], 1)
+local values = redis.call('hGet', KEYS[1], KEYS[4])
+if values == false then
+  values = ARGV[1]
+else
+  values = values .. "," .. ARGV[1]
+end
+redis.call('hSet', KEYS[1], KEYS[4], values)
+if increment == ARGV[1] then
+    redis.call('hSet', KEYS[1], '__meta', ARGV[2])
+    redis.call('sAdd', KEYS[5], KEYS[1])
+end
+LUA
+            ,
+            array(
+                $this->toMetricKey($data),
+                json_encode(array('b' => 'sum', 'labelValues' => $data['labelValues'])),
+                json_encode(array('b' => 'count', 'labelValues' => $data['labelValues'])),
+                json_encode(array('b' => 'values', 'labelValues' => $data['labelValues'])),
+                self::$prefix . Summary::TYPE . self::PROMETHEUS_METRIC_KEYS_SUFFIX,
+                $data['value'],
+                json_encode($metaData),
+            ),
+            5
+        );
     }
 
     public function updateHistogram(array $data)
@@ -193,6 +231,64 @@ LUA
             4
         );
         return $result;
+    }
+
+    private function collectSummaries()
+    {
+        $keys = $this->redis->sMembers(self::$prefix . Summary::TYPE . self::PROMETHEUS_METRIC_KEYS_SUFFIX);
+        sort($keys);
+        $summaries = array();
+        foreach ($keys as $key) {
+            $raw = $this->redis->hGetAll($key);
+            $summary = json_decode($raw['__meta'], true);
+            unset($raw['__meta']);
+
+            $allLabelValues = array();
+            foreach (array_keys($raw) as $k) {
+                $d = json_decode($k, true);
+                $allLabelValues[] = $d['labelValues'];
+            }
+
+            // We need set semantics.
+            // This is the equivalent of array_unique but for arrays of arrays.
+            $allLabelValues = array_map('unserialize', array_unique(array_map('serialize', $allLabelValues)));
+            sort($allLabelValues);
+
+            foreach ($allLabelValues as $labelValues) {
+                $valuesKey = json_encode(array('b' => 'values', 'labelValues' => $labelValues));
+                $values = !empty($raw[$valuesKey]) ? explode(',', $raw[$valuesKey]) : array();
+
+                foreach($summary['quantiles'] as $quantile) {
+                    $summary['samples'][] = array(
+                        'name' => $summary['name'],
+                        'labelNames' => array('quantile'),
+                        'labelValues' => array_merge($labelValues, array('quantile' => $quantile)),
+                        'value' => Summary::getQuantile($quantile, $values)
+                    );
+                }
+
+
+                // Add the count
+                $countKey = json_encode(array('b' => 'count', 'labelValues' => $labelValues));
+                $summary['samples'][] = array(
+                    'name' => $summary['name'] . '_count',
+                    'labelNames' => array(),
+                    'labelValues' => $labelValues,
+                    'value' => !empty($raw[$countKey]) ? (int)$raw[$countKey] : 0,
+                );
+
+                // Add the sum
+                $sumKey = json_encode(array('b' => 'sum', 'labelValues' => $labelValues));
+                $summary['samples'][] = array(
+                    'name' => $summary['name'] . '_sum',
+                    'labelNames' => array(),
+                    'labelValues' => $labelValues,
+                    'value' => !empty($raw[$sumKey]) ? $raw[$sumKey] : 0,
+                );
+            }
+            $summaries[] = $summary;
+        }
+        return $summaries;
     }
 
     private function collectHistograms()
