@@ -52,9 +52,14 @@ class InMemory implements Adapter
         );
     }
 
+    public function updateSummary(array $data)
+    {
+        // TODO: Implement updateSummary() method.
+    }
+
     public function updateHistogram(array $data)
     {
-        // TODO: Implement incrementByFloat() method.
+        // TODO: Implement updateHistogram() method.
     }
 
     public function updateGauge(array $data)

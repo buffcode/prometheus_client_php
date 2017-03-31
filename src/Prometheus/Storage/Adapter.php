@@ -1,9 +1,7 @@
 <?php
 namespace Prometheus\Storage;
 
-use Prometheus\Collector;
 use Prometheus\MetricFamilySamples;
-use Prometheus\Sample;
 
 interface Adapter
 {
@@ -17,6 +15,8 @@ interface Adapter
     public function collect();
 
     public function updateHistogram(array $data);
+
+    public function updateSummary(array $data);
 
     public function updateGauge(array $data);
 
